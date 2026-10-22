@@ -1,4 +1,4 @@
-require('dotenv').config({ path: './env' });
+require('dotenv').config();
 const express = require('express');
 const path = require('path');
 const fs = require('fs');
@@ -10,7 +10,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const SECRET = process.env.JWT_SECRET || 'development-only-change-this-secret';
 const ROOT = __dirname;
-const DATA_DIR = path.join(ROOT, 'data');
+const DATA_DIR = path.join('/tmp', 'data');
 const DB_FILE = path.join(DATA_DIR, 'db.json');
 fs.mkdirSync(DATA_DIR, {recursive:true}); fs.mkdirSync(path.join(ROOT,'uploads'),{recursive:true});
 app.use(express.json({limit:'8mb'})); app.use(express.urlencoded({extended:true}));
@@ -48,4 +48,8 @@ app.post('/api/ai/solve',auth,upload.single('image'),async(req,res)=>{try{const 
 app.post('/api/ai/generate-questions',auth,roles('admin','teacher'),async(req,res)=>{try{const {className='Class 8',subject='Mathematics',topic='General',count=5,difficulty='medium',language='Hindi'}=req.body;const n=Math.max(1,Math.min(20,Number(count)||5));const prompt=`Create exactly ${n} multiple-choice questions for ${className}, subject ${subject}, topic ${topic}. Difficulty: ${difficulty}. Language: ${language}. Return ONLY valid JSON array, no markdown. Each object must have keys question (string), options (array of exactly 4 strings), answer (zero-based integer 0-3), explanation (string), marks (number). Ensure one correct answer and age-appropriate curriculum.`;const raw=await askGemini([{text:prompt}]);const clean=raw.replace(/^```(?:json)?\s*/i,'').replace(/\s*```$/,'');const questions=JSON.parse(clean);if(!Array.isArray(questions))throw new Error('AI response was not a question list. Try again.');res.json({questions:questions.slice(0,n)})}catch(e){res.status(503).json({error:e.message})}});
 app.get('/portal',(req,res)=>res.sendFile(path.join(ROOT,'portal.html')));
 app.get('*',(req,res)=>res.sendFile(path.join(ROOT,'index.html')));
-ensureAdmin().then(()=>app.listen(PORT,()=>console.log(`Education Coaching Centre running on http://localhost:${PORT}`)));
+ensureAdmin();
+module.exports = app;
+if (require.main === module) {
+  app.listen(PORT,()=>console.log(`Education Coaching Centre running on http://localhost:${PORT}`));
+}
