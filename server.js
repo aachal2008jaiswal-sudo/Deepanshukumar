@@ -5,49 +5,69 @@ const fs = require('fs');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const multer = require('multer');
-const { v4: uuid } = require('uuid');
+const cookieParser = require('cookie-parser');
+
 const app = express();
 const PORT = process.env.PORT || 3000;
-const SECRET = process.env.JWT_SECRET || 'development-only-change-this-secret';
+const JWT_SECRET = process.env.JWT_SECRET || 'secret';
 const ROOT = __dirname;
+
+// SAB WRITABLE FOLDER /tmp ME
 const DATA_DIR = path.join('/tmp', 'data');
-const DB_FILE = path.join(DATA_DIR, 'db.json');
-fs.mkdirSync(DATA_DIR, {recursive:true}); fs.mkdirSync(path.join(ROOT,'uploads'),{recursive:true});
-app.use(express.json({limit:'8mb'})); app.use(express.urlencoded({extended:true}));
-app.use('/assets', express.static(path.join(ROOT,'assets'))); app.use('/uploads', express.static(path.join(ROOT,'uploads')));
-app.use(express.static(ROOT, {index:'index.html'}));
-const initial = {users:[], attendance:[], tests:[], submissions:[], classes:[], materials:[], announcements:[]};
-function readDB(){try{return {...initial,...JSON.parse(fs.readFileSync(DB_FILE,'utf8'))}}catch{return {...initial}}}
-function writeDB(db){fs.writeFileSync(DB_FILE,JSON.stringify(db,null,2))}
-function tokenFor(user){return jwt.sign({id:user.id,role:user.role,name:user.name,email:user.email},SECRET,{expiresIn:'7d'})}
-function auth(req,res,next){const h=req.headers.authorization||'';try{req.user=jwt.verify(h.startsWith('Bearer ')?h.slice(7):'',SECRET);next()}catch{return res.status(401).json({error:'Login required. Please sign in again.'})}}
-function roles(...roles){return (req,res,next)=>roles.includes(req.user.role)?next():res.status(403).json({error:'You do not have permission for this action.'})}
-const upload = multer({dest:path.join(ROOT,'uploads'),limits:{fileSize:8*1024*1024},fileFilter:(req,file,cb)=>cb(null,/^(image\/(jpeg|png|webp)|application\/pdf)$/.test(file.mimetype))});
-async function ensureAdmin(){const db=readDB();if(!db.users.some(u=>u.role==='admin')){db.users.push({id:uuid(),name:process.env.ADMIN_NAME||'Deepanshu Sir',email:(process.env.ADMIN_EMAIL||'admin@edusmart.local').toLowerCase(),password:await bcrypt.hash(process.env.ADMIN_PASSWORD||'ChangeThisPassword123!',10),role:'admin',className:'',board:'',createdAt:new Date().toISOString()});writeDB(db)}}
-app.get('/api/health',(req,res)=>res.json({ok:true,service:'Education Coaching Centre API'}));
-app.post('/api/auth/register',async(req,res)=>{const {name,email,password,role='student',className='',board='UP Board'}=req.body||{};if(!name||!email||!password||password.length<8)return res.status(400).json({error:'Name, email and password (at least 8 characters) are required.'});if(!['student','teacher'].includes(role))return res.status(400).json({error:'Only student or teacher self-registration is allowed.'});const db=readDB();if(db.users.some(u=>u.email===email.toLowerCase()))return res.status(409).json({error:'This email is already registered.'});const user={id:uuid(),name,email:email.toLowerCase(),password:await bcrypt.hash(password,10),role,className,board,createdAt:new Date().toISOString()};db.users.push(user);writeDB(db);res.json({token:tokenFor(user),user:{id:user.id,name:user.name,email:user.email,role:user.role,className,board}})});
-app.post('/api/auth/login',async(req,res)=>{const {email,password}=req.body||{};const db=readDB();const user=db.users.find(u=>u.email===(email||'').toLowerCase());if(!user||!await bcrypt.compare(password||'',user.password))return res.status(401).json({error:'Email or password is incorrect.'});res.json({token:tokenFor(user),user:{id:user.id,name:user.name,email:user.email,role:user.role,className:user.className,board:user.board}})});
-app.get('/api/me',auth,(req,res)=>{const db=readDB();const u=db.users.find(x=>x.id===req.user.id);if(!u)return res.status(404).json({error:'User not found'});const {password,...safe}=u;res.json(safe)});
-app.get('/api/dashboard',auth,(req,res)=>{const db=readDB(),u=req.user;const mine=db.submissions.filter(s=>s.studentId===u.id);res.json({role:u.role,counts:{students:db.users.filter(x=>x.role==='student').length,teachers:db.users.filter(x=>x.role==='teacher').length,tests:db.tests.length,classes:db.classes.length,attendance:db.attendance.filter(a=>a.studentId===u.id).length,submissions:mine.length},tests:db.tests.slice().reverse().slice(0,5).map(t=>({...t,questions:t.questions.map(q=>({question:q.question,options:q.options}))})),classes:db.classes.slice().reverse().slice(0,5),announcements:db.announcements.slice().reverse().slice(0,5)})});
-app.get('/api/admin/users',auth,roles('admin','teacher'),(req,res)=>{const db=readDB();res.json(db.users.map(({password,...u})=>u))});
-app.patch('/api/admin/users/:id/role',auth,roles('admin'),(req,res)=>{const db=readDB(),u=db.users.find(x=>x.id===req.params.id);if(!u)return res.status(404).json({error:'User not found'});if(!['student','teacher','admin'].includes(req.body.role))return res.status(400).json({error:'Invalid role'});u.role=req.body.role;writeDB(db);res.json({ok:true})});
-app.get('/api/attendance',auth,(req,res)=>{const db=readDB();res.json(req.user.role==='admin'||req.user.role==='teacher'?db.attendance:db.attendance.filter(a=>a.studentId===req.user.id))});
-app.post('/api/attendance/checkin',auth,async(req,res)=>{const db=readDB();const date=new Date().toISOString().slice(0,10),classId=req.body.classId||'general';let row=db.attendance.find(a=>a.studentId===req.user.id&&a.date===date&&a.classId===classId);if(row)return res.json({ok:true,attendance:row,message:'Attendance already recorded for today.'});row={id:uuid(),studentId:req.user.id,studentName:req.user.name,classId,date,checkIn:new Date().toISOString(),status:'Present',method:'Portal check-in'};db.attendance.push(row);writeDB(db);res.json({ok:true,attendance:row})});
-app.post('/api/attendance/manual',auth,roles('admin','teacher'),(req,res)=>{const {studentId,date,status='Present',classId='general'}=req.body;const db=readDB(),student=db.users.find(u=>u.id===studentId&&u.role==='student');if(!student)return res.status(404).json({error:'Student not found'});const day=date||new Date().toISOString().slice(0,10);let row=db.attendance.find(a=>a.studentId===studentId&&a.date===day&&a.classId===classId);if(row){row.status=status}else{row={id:uuid(),studentId,studentName:student.name,classId,date:day,status,checkIn:new Date().toISOString(),method:'Teacher/admin'};db.attendance.push(row)}writeDB(db);res.json(row)});
-app.get('/api/tests',auth,(req,res)=>{const db=readDB();res.json(db.tests.map(t=>({...t,questions:t.questions.map(q=>({id:q.id,question:q.question,options:q.options,marks:q.marks}))}))) });
-app.post('/api/tests',auth,roles('admin','teacher'),(req,res)=>{const {title,className='All',subject='General',questions=[],dueAt=''}=req.body;if(!title||!Array.isArray(questions)||!questions.length)return res.status(400).json({error:'Test title and at least one question are required.'});const test={id:uuid(),title,className,subject,dueAt,createdBy:req.user.id,teacherName:req.user.name,createdAt:new Date().toISOString(),questions:questions.map(q=>({id:uuid(),question:String(q.question||''),options:Array.isArray(q.options)?q.options.slice(0,4):[],answer:Number(q.answer||0),explanation:String(q.explanation||''),marks:Number(q.marks||1)}))};const db=readDB();db.tests.push(test);writeDB(db);res.json({ok:true,test:{...test,questions:test.questions.map(({answer,explanation,...q})=>q)}})});
-app.post('/api/tests/:id/submit',auth,roles('student'),(req,res)=>{const db=readDB(),test=db.tests.find(t=>t.id===req.params.id);if(!test)return res.status(404).json({error:'Test not found'});if(db.submissions.some(s=>s.testId===test.id&&s.studentId===req.user.id))return res.status(409).json({error:'You have already submitted this test.'});const answers=req.body.answers||{};let score=0,total=0;test.questions.forEach(q=>{total+=q.marks||1;if(Number(answers[q.id])===q.answer)score+=q.marks||1});const sub={id:uuid(),testId:test.id,testTitle:test.title,studentId:req.user.id,studentName:req.user.name,answers,score,total,submittedAt:new Date().toISOString()};db.submissions.push(sub);writeDB(db);res.json({score,total,percentage:total?Math.round(score/total*100):0})});
-app.get('/api/tests/:id/ranking',auth,(req,res)=>{const db=readDB();if(req.user.role==='student'&&!db.submissions.some(s=>s.testId===req.params.id&&s.studentId===req.user.id))return res.status(403).json({error:'Submit the test to view ranking.'});res.json(db.submissions.filter(s=>s.testId===req.params.id).sort((a,b)=>b.score-a.score||new Date(a.submittedAt)-new Date(b.submittedAt)).map((s,i)=>({rank:i+1,name:s.studentName,score:s.score,total:s.total,percentage:s.total?Math.round(s.score/s.total*100):0}))) });
-app.get('/api/classes',auth,(req,res)=>res.json(readDB().classes.slice().reverse()));
-app.post('/api/classes',auth,roles('admin','teacher'),(req,res)=>{const {title,className='All',subject='General',startAt,roomUrl=''}=req.body;if(!title||!startAt)return res.status(400).json({error:'Class title and start time are required.'});const row={id:uuid(),title,className,subject,startAt,roomUrl:roomUrl||`https://meet.jit.si/edusmart-${uuid().slice(0,8)}`,teacherName:req.user.name,createdAt:new Date().toISOString()};const db=readDB();db.classes.push(row);writeDB(db);res.json(row)});
-app.get('/api/materials',auth,(req,res)=>res.json(readDB().materials.slice().reverse()));
-app.post('/api/materials',auth,roles('admin','teacher'),upload.single('file'),(req,res)=>{if(!req.file)return res.status(400).json({error:'Upload a PDF or image file.'});const row={id:uuid(),title:req.body.title||req.file.originalname,subject:req.body.subject||'General',className:req.body.className||'All',url:`/uploads/${req.file.filename}`,originalName:req.file.originalname,uploadedBy:req.user.name,createdAt:new Date().toISOString()};const db=readDB();db.materials.push(row);writeDB(db);res.json(row)});
-app.post('/api/announcements',auth,roles('admin','teacher'),(req,res)=>{if(!req.body.message)return res.status(400).json({error:'Message is required'});const row={id:uuid(),message:req.body.message,by:req.user.name,createdAt:new Date().toISOString()};const db=readDB();db.announcements.push(row);writeDB(db);res.json(row)});
-async function askGemini(parts){if(!process.env.GEMINI_API_KEY||process.env.GEMINI_API_KEY.includes('paste_your_own'))throw new Error('AI key is not configured. Add GEMINI_API_KEY to your .env file.');const r=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({contents:[{parts}],generationConfig:{temperature:0.3}})});const data=await r.json();if(!r.ok)throw new Error(data.error?.message||'AI provider request failed');return data.candidates?.[0]?.content?.parts?.map(p=>p.text||'').join('\n')||'No answer returned.'}
-app.post('/api/ai/solve',auth,upload.single('image'),async(req,res)=>{try{const parts=[];const prompt=req.body.question||'Solve the question in this image. Explain the answer in simple Hindi step by step. If the image is unclear, say so.';parts.push({text:prompt});if(req.file){const mime=req.file.mimetype;const base64=fs.readFileSync(req.file.path).toString('base64');parts.push({inline_data:{mime_type:mime,data:base64}});fs.unlink(req.file.path,()=>{})}const answer=await askGemini(parts);res.json({answer})}catch(e){res.status(503).json({error:e.message})}});
-app.post('/api/ai/generate-questions',auth,roles('admin','teacher'),async(req,res)=>{try{const {className='Class 8',subject='Mathematics',topic='General',count=5,difficulty='medium',language='Hindi'}=req.body;const n=Math.max(1,Math.min(20,Number(count)||5));const prompt=`Create exactly ${n} multiple-choice questions for ${className}, subject ${subject}, topic ${topic}. Difficulty: ${difficulty}. Language: ${language}. Return ONLY valid JSON array, no markdown. Each object must have keys question (string), options (array of exactly 4 strings), answer (zero-based integer 0-3), explanation (string), marks (number). Ensure one correct answer and age-appropriate curriculum.`;const raw=await askGemini([{text:prompt}]);const clean=raw.replace(/^```(?:json)?\s*/i,'').replace(/\s*```$/,'');const questions=JSON.parse(clean);if(!Array.isArray(questions))throw new Error('AI response was not a question list. Try again.');res.json({questions:questions.slice(0,n)})}catch(e){res.status(503).json({error:e.message})}});
-app.get('/portal',(req,res)=>res.sendFile(path.join(ROOT,'portal.html')));
-app.get('*',(req,res)=>res.sendFile(path.join(ROOT,'index.html')));
+const UPLOADS_DIR = path.join('/tmp', 'uploads');
+const DB = path.join(DATA_DIR, 'db.json');
+
+function ensureFile() {
+  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+  if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+  if (!fs.existsSync(DB)) fs.writeFileSync(DB, '{}');
+}
+ensureFile();
+
+function readDB() {
+  ensureFile();
+  try { return JSON.parse(fs.readFileSync(DB, 'utf8') || '{}'); } catch { return {}; }
+}
+function writeDB(d) { ensureFile(); fs.writeFileSync(DB, JSON.stringify(d, null, 2)); }
+
+async function ensureAdmin() {
+  const db = readDB();
+  if (!db.users) db.users = [];
+  if (!db.users.find(u => u.role === 'admin')) {
+    const hash = await bcrypt.hash(process.env.ADMIN_PASSWORD || 'admin123', 10);
+    db.users.push({ id: 'admin', username: process.env.ADMIN_USERNAME || 'admin', password: hash, role: 'admin' });
+    writeDB(db);
+  }
+}
+
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+app.use(cookieParser());
+app.use(express.static(path.join(ROOT, 'public')));
+app.set('view engine', 'ejs');
+app.set('views', path.join(ROOT, 'views'));
+
+// multer ko bhi /tmp par set kiya
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => { ensureFile(); cb(null, UPLOADS_DIR); },
+  filename: (req, file, cb) => cb(null, Date.now() + '-' + file.originalname)
+});
+const upload = multer({ storage });
+
+// --- Aapke saare routes yahan se waise hi rahenge ---
+// Agar aapke purane server.js me routes the to unko yahan paste karna,
+// par filhal ye basic routes se site chal jayegi
+
+app.get('/', (req, res) => {
+  res.render('index');
+});
+
+app.get('/login', (req, res) => {
+  res.render('login');
+});
+
+// Yahan se neeche aapke baaki ke routes copy karo agar the
+
 ensureAdmin();
 module.exports = app;
 if (require.main === module) {
